@@ -8,38 +8,48 @@ use opengl_graphics::{ GlGraphics, OpenGL };
 use piston::window::{ Window, WindowSettings };
 use piston::input::*;
 use piston::event_loop::*;
-use sdl2::audio::{AudioCallback, AudioSpecDesired};
+use sdl2::audio::{AudioCallback, AudioSpecDesired,AudioSpecWAV,AudioCVT};
 #[cfg(feature = "include_sdl2")]
 use sdl2_window::Sdl2Window as AppWindow;
+use std::borrow::Cow;
+use std::path::{PathBuf, Path};
 use std::sync::mpsc::{ channel, Receiver };
 
-struct SquareWave {
-    phase_inc: f32,
-    phase: f32,
+
+struct Sound {
+    data: Vec<u8>,
     volume: f32,
-    sample_rate: f32,
-    pitch_recv: Receiver<f32>,
+    pos: usize,
+    pos_chan: Receiver<usize>
 }
 
-impl AudioCallback for SquareWave {
-    type Channel = f32;
+impl AudioCallback for Sound {
+    type Channel = u8;
 
-    fn callback(&mut self, out: &mut [f32]) {
-        match self.pitch_recv.try_recv() {
+    fn callback(&mut self, out: &mut [u8]) {
+        let len = self.data.len();
+        match self.pos_chan.try_recv() {
             Ok(val) => {
-                self.phase_inc = val / self.sample_rate;
+                self.pos = val;
             }
-            Err(_err) => {}
+            Err(_e) => {}
         }
-        // Generate a square wave
-        for x in out.iter_mut() {
-            *x = if self.phase <= 0.5 { self.volume } else { -self.volume };
-            self.phase = (self.phase + self.phase_inc) % 1.0;
+        for dst in out.iter_mut() {
+            if self.pos > len {
+                self.pos = 0;
+            }
+            *dst = (*self.data.get(self.pos).unwrap_or(&0) as f32 * self.volume) as u8;
+            self.pos += 1;
         }
     }
 }
 
 fn main() {
+    let wav_file : Cow<'static, Path> = match std::env::args().nth(1) {
+        None => Cow::from(Path::new("./assets/sine.wav")),
+        Some(s) => Cow::from(PathBuf::from(s))
+    };
+
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let (tx, rx) = channel();
@@ -52,16 +62,22 @@ fn main() {
     };
 
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
-        // Show obtained AudioSpec
-        println!("{:?}", spec);
+        let wav = AudioSpecWAV::load_wav(wav_file)
+            .expect("Could not load test WAV file");
+
+        let cvt = AudioCVT::new(
+                wav.format, wav.channels, wav.freq,
+                spec.format, spec.channels, spec.freq)
+            .expect("Could not convert WAV file");
+
+        let data = cvt.convert(wav.buffer().to_vec());
 
         // initialize the audio callback
-        SquareWave {
-            phase_inc: 440.0 / spec.freq as f32,
-            phase: 0.0,
-            volume: 0.125,
-            sample_rate: spec.freq as f32,
-            pitch_recv: rx,
+        Sound {
+            data: data,
+            volume: 0.25,
+            pos: 0,
+            pos_chan: rx,
         }
     }).unwrap();
 
@@ -102,7 +118,7 @@ fn main() {
                 let newpitch = (y.round() * 2.0) / 13.0 + 220.0;
                 if pitch != newpitch {
                     pitch = newpitch;
-                    tx.send(newpitch as f32);
+                    tx.send(newpitch.floor() as usize).unwrap();
                 }
             }
         });
