@@ -1,0 +1,30 @@
+[package]
+name = "piston-test"
+version = "0.1.0"
+authors = ["Donovan Preston <donovanpreston@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+piston = "0.39.0"
+piston2d-opengl_graphics = "0.57.0"
+piston2d-graphics = "0.28.0"
+sdl2 = "0.32"
+
+[dependencies.pistoncore-sdl2_window]
+version = "0.52.0"
+optional = true
+
+[dependencies.pistoncore-glfw_window]
+version = "0.46.0"
+optional = true
+
+[dependencies.pistoncore-glutin_window]
+version = "0.51.0"
+optional = true
+
+[features]
+default = ["include_glutin"]
+include_sdl2 = ["pistoncore-sdl2_window"]
+include_glfw = ["pistoncore-glfw_window"]
+include_glutin = ["pistoncore-glutin_window"]
+
