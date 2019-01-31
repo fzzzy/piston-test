@@ -8,7 +8,7 @@ use opengl_graphics::{ GlGraphics, OpenGL };
 use piston::window::{ Window, WindowSettings };
 use piston::input::*;
 use piston::event_loop::*;
-use sdl2::audio::{AudioCallback, AudioSpecDesired,AudioSpecWAV,AudioCVT};
+use sdl2::audio::{AudioCallback, AudioFormat, AudioSpecDesired, AudioSpecWAV, AudioCVT};
 #[cfg(feature = "include_sdl2")]
 use sdl2_window::Sdl2Window as AppWindow;
 use std::borrow::Cow;
@@ -20,7 +20,7 @@ struct Sound {
     data: Vec<u8>,
     volume: f32,
     pos: usize,
-    pos_chan: Receiver<usize>
+    pos_chan: Receiver<f64>
 }
 
 impl AudioCallback for Sound {
@@ -30,7 +30,7 @@ impl AudioCallback for Sound {
         let len = self.data.len();
         match self.pos_chan.try_recv() {
             Ok(val) => {
-                self.pos = val;
+                self.pos = (len as f64 * val) as usize;
             }
             Err(_e) => {}
         }
@@ -45,36 +45,37 @@ impl AudioCallback for Sound {
 }
 
 fn main() {
-    let wav_file : Cow<'static, Path> = match std::env::args().nth(1) {
-        None => Cow::from(Path::new("./assets/sine.wav")),
-        Some(s) => Cow::from(PathBuf::from(s))
-    };
+    let wav_file = Cow::from(Path::new("./assets/amen.wav"));
 
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
     let (tx, rx) = channel();
-    let mut pitch = 440.0;
 
     let desired_spec = AudioSpecDesired {
         freq: Some(44_100),
         channels: Some(1),  // mono
         samples: None       // default sample size
     };
+    let wav = AudioSpecWAV::load_wav(wav_file)
+        .expect("Could not load test WAV file");
+    let waveform_data = wav.buffer();
+    let waveform_data_length = waveform_data.len();
+
+    let displaycvt = AudioCVT::new(
+        wav.format, wav.channels, wav.freq,
+        AudioFormat::U8, 1, 8000
+    ).expect("Could not convert WAV file for display");
+    let display_data = displaycvt.convert(wav.buffer().to_vec());
+    let display_length = display_data.len();
 
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
-        let wav = AudioSpecWAV::load_wav(wav_file)
-            .expect("Could not load test WAV file");
-
         let cvt = AudioCVT::new(
-                wav.format, wav.channels, wav.freq,
-                spec.format, spec.channels, spec.freq)
-            .expect("Could not convert WAV file");
-
-        let data = cvt.convert(wav.buffer().to_vec());
-
-        // initialize the audio callback
+            wav.format, wav.channels, wav.freq,
+            spec.format, spec.channels, spec.freq)
+        .expect("Could not convert WAV file");
+        let audio_data = cvt.convert(wav.buffer().to_vec());
         Sound {
-            data: data,
+            data: audio_data,
             volume: 0.25,
             pos: 0,
             pos_chan: rx,
@@ -96,12 +97,14 @@ fn main() {
     while let Some(e) = events.next(&mut window) {
         if let Some(Button::Mouse(button)) = e.press_args() {
             println!("Pressed mouse button '{:?}'", button);
+            let ratio = cursor[0] / 1024.0;
+            tx.send(ratio);
         }
         if let Some(Button::Keyboard(key)) = e.press_args() {
             println!("Pressed keyboard key '{:?}'", key);
         };
         if let Some(args) = e.button_args() {
-            println!("Scancode {:?}", args.scancode);
+            //println!("Scancode {:?}", args.scancode);
         }
         if let Some(button) = e.release_args() {
             match button {
@@ -113,17 +116,10 @@ fn main() {
         };
         e.mouse_cursor(|x, y| {
             cursor = [x, y];
-            println!("Mouse moved '{} {}'", x, y);
-            if (y.round() * 2.0) % 13.0 == 0.0 {
-                let newpitch = (y.round() * 2.0) / 13.0 + 220.0;
-                if pitch != newpitch {
-                    pitch = newpitch;
-                    tx.send(newpitch.floor() as usize).unwrap();
-                }
-            }
+            //println!("Mouse moved '{} {}'", x, y);
         });
         e.mouse_scroll(|dx, dy| println!("Scrolled mouse '{}, {}'", dx, dy));
-        e.mouse_relative(|dx, dy| println!("Relative mouse moved '{} {}'", dx, dy));
+        //e.mouse_relative(|dx, dy| println!("Relative mouse moved '{} {}'", dx, dy));
         e.text(|text| println!("Typed '{}'", text));
         e.resize(|w, h| println!("Resized '{}, {}'", w, h));
         if let Some(cursor) = e.cursor_args() {
@@ -133,10 +129,30 @@ fn main() {
         if let Some(args) = e.render_args() {
             // println!("Render {}", args.ext_dt);
             gl.draw(args.viewport(), |c, g| {
-                    graphics::clear([1.0; 4], g);
-                    draw_rectangles(cursor, &window, &c, g);
+                let full_width = window.size().width;
+                let one_quarter = full_width as f64 / 4.0;
+                let full_height = window.size().height;
+                let half_height = full_height / 2.0;
+
+                graphics::clear([1.0; 4], g);
+                // draw_rectangles(cursor, &window, &c, g);
+                let wave = graphics::Line::new([0.5, 0.5, 0.5, 1.0], 1.0);
+
+                for xval in 1..full_width as u32 {
+                    let step = xval as f64 / full_width as f64;
+                    let rawy = display_data[(display_length as f64 * step) as usize];
+                    let yval = (rawy as f64 / 255.0 * full_height);
+                    wave.draw([xval as f64, half_height, xval as f64, yval as f64],
+                        &c.draw_state, c.transform, g);
                 }
-            );
+                // let line = graphics::Line::new([0.0, 0.0, 0.0, 1.0], 1.0);
+                // line.draw([one_quarter, 0.0, one_quarter, full_height],
+                //     &c.draw_state, c.transform, g);
+                // line.draw([one_quarter * 2.0, 0.0, one_quarter * 2.0, full_height],
+                //     &c.draw_state, c.transform, g);
+                // line.draw([one_quarter * 3.0, 0.0, one_quarter * 3.0, full_height],
+                //     &c.draw_state, c.transform, g);
+            });
         }
         if let Some(_args) = e.idle_args() {
             // println!("Idle {}", _args.dt);
@@ -184,8 +200,11 @@ fn draw_rectangles<G: Graphics>(
         &c.draw_state, c.transform, g);
 
     let line = graphics::Line::new([0.5, 0.5, 0.5, 1.0], 1.0);
-    line.draw([0.0, 0.0, size.width as f64, size.height as f64],
+    let one_quarter = size.width as f64 / 4.0;
+    line.draw([one_quarter, 0.0, one_quarter, size.height as f64],
         &c.draw_state, c.transform, g);
-    line.draw([size.width as f64, 0.0, 0.0, size.height as f64],
+    line.draw([one_quarter * 2.0, 0.0, one_quarter * 2.0, size.height as f64],
+        &c.draw_state, c.transform, g);
+    line.draw([one_quarter * 3.0, 0.0, one_quarter * 3.0, size.height as f64],
         &c.draw_state, c.transform, g);
 }
