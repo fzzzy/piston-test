@@ -19,8 +19,11 @@ use std::sync::mpsc::{ channel, Receiver };
 struct Sound {
     data: Vec<u8>,
     volume: f32,
-    pos: usize,
-    pos_chan: Receiver<f64>
+    begin: usize,
+    begin_chan: Receiver<f64>,
+    end: usize,
+    end_chan: Receiver<f64>,
+    pos: usize
 }
 
 impl AudioCallback for Sound {
@@ -28,15 +31,36 @@ impl AudioCallback for Sound {
 
     fn callback(&mut self, out: &mut [u8]) {
         let len = self.data.len();
-        match self.pos_chan.try_recv() {
-            Ok(val) => {
-                self.pos = (len as f64 * val) as usize;
-            }
-            Err(_e) => {}
+        if self.begin == 0 && self.end == 0 {
+            self.end = len;
         }
+
+        let mut br = false;
+        while !br {
+            match self.begin_chan.try_recv() {
+                Ok(val) => {
+                    self.begin = (len as f64 * val) as usize;
+                }
+                Err(_e) => {
+                    br = true;
+                }
+            }
+        }
+        br = false;
+        while !br {
+            match self.end_chan.try_recv() {
+                Ok(val) => {
+                    self.end = (len as f64 * val) as usize;
+                }
+                Err(_e) => {
+                    br = true;
+                }
+            }
+        }
+
         for dst in out.iter_mut() {
-            if self.pos > len {
-                self.pos = 0;
+            if self.pos > self.end {
+                self.pos = self.begin;
             }
             *dst = (*self.data.get(self.pos).unwrap_or(&0) as f32 * self.volume) as u8;
             self.pos += 1;
@@ -49,7 +73,11 @@ fn main() {
 
     let sdl_context = sdl2::init().unwrap();
     let audio_subsystem = sdl_context.audio().unwrap();
-    let (tx, rx) = channel();
+    let mut begin = 0 as f64;
+    let mut end = 1 as f64;
+    let mut button_down = false;
+    let (txbegin, rxbegin) = channel();
+    let (txend, rxend) = channel();
 
     let desired_spec = AudioSpecDesired {
         freq: Some(44_100),
@@ -77,8 +105,11 @@ fn main() {
         Sound {
             data: audio_data,
             volume: 0.25,
+            begin: 0,
+            begin_chan: rxbegin,
+            end: 0,
+            end_chan: rxend,
             pos: 0,
-            pos_chan: rx,
         }
     }).unwrap();
 
@@ -96,9 +127,17 @@ fn main() {
 
     while let Some(e) = events.next(&mut window) {
         if let Some(Button::Mouse(button)) = e.press_args() {
+            button_down = true;
             println!("Pressed mouse button '{:?}'", button);
             let ratio = cursor[0] / 1024.0;
-            tx.send(ratio);
+            println!("ratios {:?} {:?}", (ratio - begin).abs(), (ratio - end).abs());
+            if (ratio - begin).abs() < (ratio - end).abs() {
+                begin = ratio;
+                txbegin.send(ratio);
+            } else {
+                end = ratio;
+                txend.send(ratio);
+            }
         }
         if let Some(Button::Keyboard(key)) = e.press_args() {
             println!("Pressed keyboard key '{:?}'", key);
@@ -109,13 +148,28 @@ fn main() {
         if let Some(button) = e.release_args() {
             match button {
                 Button::Keyboard(key) => println!("Released keyboard key '{:?}'", key),
-                Button::Mouse(button) => println!("Released mouse button '{:?}'", button),
+                Button::Mouse(button) => {
+                    println!("Released mouse button '{:?}'", button);
+                    button_down = false;
+                },
                 Button::Controller(button) => println!("Released controller button '{:?}'", button),
                 Button::Hat(hat) => println!("Released controller hat `{:?}`", hat),
             }
         };
         e.mouse_cursor(|x, y| {
             cursor = [x, y];
+            if button_down {
+                let ratio = cursor[0] / 1024.0;
+                println!("ratios {:?} {:?}", (ratio - begin).abs(), (ratio - end).abs());
+                if (ratio - begin).abs() < (ratio - end).abs() {
+                    begin = ratio;
+                    txbegin.send(ratio);
+                } else {
+                    end = ratio;
+                    txend.send(ratio);
+                }
+            }
+
             //println!("Mouse moved '{} {}'", x, y);
         });
         e.mouse_scroll(|dx, dy| println!("Scrolled mouse '{}, {}'", dx, dy));
@@ -135,7 +189,6 @@ fn main() {
                 let half_height = full_height / 2.0;
 
                 graphics::clear([1.0; 4], g);
-                // draw_rectangles(cursor, &window, &c, g);
                 let wave = graphics::Line::new([0.5, 0.5, 0.5, 1.0], 1.0);
 
                 for xval in 1..full_width as u32 {
@@ -145,13 +198,7 @@ fn main() {
                     wave.draw([xval as f64, half_height, xval as f64, yval as f64],
                         &c.draw_state, c.transform, g);
                 }
-                // let line = graphics::Line::new([0.0, 0.0, 0.0, 1.0], 1.0);
-                // line.draw([one_quarter, 0.0, one_quarter, full_height],
-                //     &c.draw_state, c.transform, g);
-                // line.draw([one_quarter * 2.0, 0.0, one_quarter * 2.0, full_height],
-                //     &c.draw_state, c.transform, g);
-                // line.draw([one_quarter * 3.0, 0.0, one_quarter * 3.0, full_height],
-                //     &c.draw_state, c.transform, g);
+                draw_rectangles(begin, end, cursor, &window, &c, g);
             });
         }
         if let Some(_args) = e.idle_args() {
@@ -172,6 +219,8 @@ fn main() {
 }
 
 fn draw_rectangles<G: Graphics>(
+    begin: f64,
+    end: f64,
     cursor: [f64; 2],
     window: &Window,
     c: &Context,
@@ -200,11 +249,9 @@ fn draw_rectangles<G: Graphics>(
         &c.draw_state, c.transform, g);
 
     let line = graphics::Line::new([0.5, 0.5, 0.5, 1.0], 1.0);
-    let one_quarter = size.width as f64 / 4.0;
-    line.draw([one_quarter, 0.0, one_quarter, size.height as f64],
+    // let one_quarter = size.width as f64 / 4.0;
+    line.draw([begin * size.width, 0.0, begin * size.width, size.height as f64],
         &c.draw_state, c.transform, g);
-    line.draw([one_quarter * 2.0, 0.0, one_quarter * 2.0, size.height as f64],
-        &c.draw_state, c.transform, g);
-    line.draw([one_quarter * 3.0, 0.0, one_quarter * 3.0, size.height as f64],
+    line.draw([end * size.width, 0.0, end * size.width, size.height as f64],
         &c.draw_state, c.transform, g);
 }
