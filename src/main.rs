@@ -12,17 +12,17 @@ use sdl2::audio::{AudioCallback, AudioFormat, AudioSpecDesired, AudioSpecWAV, Au
 #[cfg(feature = "include_sdl2")]
 use sdl2_window::Sdl2Window as AppWindow;
 use std::borrow::Cow;
-use std::path::{PathBuf, Path};
-use std::sync::mpsc::{ channel, Receiver };
+use std::path::Path;
+use std::sync::{Mutex, Arc};
 
 
 struct Sound {
     data: Vec<u8>,
     volume: f32,
     begin: usize,
-    begin_chan: Receiver<f64>,
+    begin_shared: Arc<Mutex<f64>>,
     end: usize,
-    end_chan: Receiver<f64>,
+    end_shared: Arc<Mutex<f64>>,
     pos: usize
 }
 
@@ -35,27 +35,13 @@ impl AudioCallback for Sound {
             self.end = len;
         }
 
-        let mut br = false;
-        while !br {
-            match self.begin_chan.try_recv() {
-                Ok(val) => {
-                    self.begin = (len as f64 * val) as usize;
-                }
-                Err(_e) => {
-                    br = true;
-                }
-            }
+        if let Ok(shared) = self.begin_shared.try_lock() {
+            let val = *shared;
+            self.begin = (len as f64 * val) as usize;
         }
-        br = false;
-        while !br {
-            match self.end_chan.try_recv() {
-                Ok(val) => {
-                    self.end = (len as f64 * val) as usize;
-                }
-                Err(_e) => {
-                    br = true;
-                }
-            }
+        if let Ok(shared) = self.end_shared.try_lock() {
+            let val = *shared;
+            self.end = (len as f64 * val) as usize;
         }
 
         for dst in out.iter_mut() {
@@ -76,8 +62,8 @@ fn main() {
     let mut begin = 0 as f64;
     let mut end = 1 as f64;
     let mut button_down = false;
-    let (txbegin, rxbegin) = channel();
-    let (txend, rxend) = channel();
+    let begin_shared = Arc::new(Mutex::new(0 as f64));
+    let end_shared = Arc::new(Mutex::new(1 as f64));
 
     let desired_spec = AudioSpecDesired {
         freq: Some(44_100),
@@ -86,8 +72,6 @@ fn main() {
     };
     let wav = AudioSpecWAV::load_wav(wav_file)
         .expect("Could not load test WAV file");
-    let waveform_data = wav.buffer();
-    let waveform_data_length = waveform_data.len();
 
     let displaycvt = AudioCVT::new(
         wav.format, wav.channels, wav.freq,
@@ -106,9 +90,9 @@ fn main() {
             data: audio_data,
             volume: 0.25,
             begin: 0,
-            begin_chan: rxbegin,
+            begin_shared: Arc::clone(&begin_shared),
             end: 0,
-            end_chan: rxend,
+            end_shared: Arc::clone(&end_shared),
             pos: 0,
         }
     }).unwrap();
@@ -133,16 +117,20 @@ fn main() {
             println!("ratios {:?} {:?}", (ratio - begin).abs(), (ratio - end).abs());
             if (ratio - begin).abs() < (ratio - end).abs() {
                 begin = ratio;
-                txbegin.send(ratio);
+                if let Ok(mut shared) = begin_shared.try_lock() {
+                    *shared = ratio;
+                }
             } else {
                 end = ratio;
-                txend.send(ratio);
+                if let Ok(mut shared) = end_shared.try_lock() {
+                    *shared = ratio;
+                }
             }
         }
         if let Some(Button::Keyboard(key)) = e.press_args() {
             println!("Pressed keyboard key '{:?}'", key);
         };
-        if let Some(args) = e.button_args() {
+        if let Some(_args) = e.button_args() {
             //println!("Scancode {:?}", args.scancode);
         }
         if let Some(button) = e.release_args() {
@@ -163,10 +151,14 @@ fn main() {
                 println!("ratios {:?} {:?}", (ratio - begin).abs(), (ratio - end).abs());
                 if (ratio - begin).abs() < (ratio - end).abs() {
                     begin = ratio;
-                    txbegin.send(ratio);
+                    if let Ok(mut shared) = begin_shared.try_lock() {
+                        *shared = ratio;
+                    }
                 } else {
                     end = ratio;
-                    txend.send(ratio);
+                    if let Ok(mut shared) = end_shared.try_lock() {
+                        *shared = ratio;
+                    }
                 }
             }
 
@@ -184,7 +176,6 @@ fn main() {
             // println!("Render {}", args.ext_dt);
             gl.draw(args.viewport(), |c, g| {
                 let full_width = window.size().width;
-                let one_quarter = full_width as f64 / 4.0;
                 let full_height = window.size().height;
                 let half_height = full_height / 2.0;
 
@@ -194,7 +185,7 @@ fn main() {
                 for xval in 1..full_width as u32 {
                     let step = xval as f64 / full_width as f64;
                     let rawy = display_data[(display_length as f64 * step) as usize];
-                    let yval = (rawy as f64 / 255.0 * full_height);
+                    let yval = rawy as f64 / 255.0 * full_height;
                     wave.draw([xval as f64, half_height, xval as f64, yval as f64],
                         &c.draw_state, c.transform, g);
                 }
